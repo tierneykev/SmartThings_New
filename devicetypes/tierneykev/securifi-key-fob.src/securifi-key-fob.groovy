@@ -1,82 +1,101 @@
+import hubitat.zigbee.clusters.iaszone.ZoneStatus
+
 metadata {
-    definition (name: "Securifi Key Fob", namespace: "tierneykev", author: "Kevin Tierney") {
-    
-    capability "Configuration"
-    capability "Button"
-    //desc: 08 0104 0401 00 03 0000 0003 0500 02 0003 0501
-    //inCluster - 0x0500 - IAS Zone, outCluster- 0x0501 - IAS ACE
-    fingerprint profileId: "0104", deviceId: "0401", inClusters: "0000,0003,0500", outClusters: "0003,0501"
+    definition (name: "Securifi Key Fob", namespace: "hubitat", author: "Kevin Tierney") {
+        capability "PushableButton"
+        capability "Configuration"
+        fingerprint profileId: "0104", inClusters: "0000,0003,0500", outClusters: "0003,0501", manufacturer: "Sercomm Corp.", model: "SZ-KFB01", deviceJoinName: "Securifi Key Fob"
     }
-
-    tiles {
-	    standardTile("button", "device.button", width: 2, height: 2) {
-		    state "default", label: "", icon: "st.unknown.zwave.remote-controller", backgroundColor: "#ffffff"
-        }
+preferences {
+        input name: "logEnable", type: "bool", title: "Enable debug logging", defaultValue: true
+        input name: "txtEnable", type: "bool", title: "Enable descriptionText logging", defaultValue: true
     }
-    main (["button"])
-    details (["button"])
 }
 
-def parse(String description) {	       	            
-    if (description?.startsWith('enroll request')) {        
-        List cmds = enrollResponse()
-        log.debug "enroll response: ${cmds}"
-        def result = cmds?.collect { new physicalgraph.device.HubAction(it) }
-        return result    
-    } else if (description?.startsWith('catchall:')) {
-        def msg = zigbee.parse(description)
-        log.debug msg
-        buttonPush(msg.data[0])
+
+
+
+
+
+
+def parse(String description) {
+
+  if (description?.startsWith("enroll request")) {
+    if (logEnable) log.debug "RECEVED ENROLL REQUEST: ${description}"
+        List cmds = zigbee.enrollResponse(1200)
+        result = cmds?.collect { new hubitat.device.HubAction(it, hubitat.device.Protocol.ZIGBEE) }
+  } else {
+    if (description?.startsWith("zone status")){
+      ZoneStatus zs = zigbee.parseZoneStatus(description)
+      if (logEnable) log.debug zs
     } else {
-        log.debug "parse description: $description"
-    }    
+      def descMap = zigbee.parseDescriptionAsMap(description)
+	  if descMap.profileid = '0000' return      
+	  if (logEnable) log.debug "Parsed Zigbee Map: ${descMap}"
+      
+	  def cluster = descMap.clusterId
+      def sourceEndpoint = descMap.sourceEndpoint
+      def button = descMap.data[0]
+      
+	  if (logEnable) log.debug "Cluster: ${cluster} Source Endpoint: ${sourceEndpoint} Button: ${button}"
+	  
+	  if(button) process_button(button)
+	  
+    }
+ }
 }
 
-def buttonPush(button){
-    //Button Numbering vs positioning is slightly counterintuitive
-    //Bottom Left Button (Unlock) = 0 and goes counterclockwise
-    //Securifi Numbering - 0 = Unlock, 1 = * (only used to join), 2 = Home, 3 = Lock
-    //For ST App Purposes 1=Lock, 2=Home, 3=Unlock , 4 = * (only used to join)
-    def name = null
-    if (button == 0) {
-        //Unlock - ST Button 3
-        name = "3"
-        def currentST = device.currentState("button3")?.value
-        log.debug "Unlock button Pushed"           
-    } else if (button == 2) {
-    	//Home - ST Button 2
-        name = "2"
-        def currentST = device.currentState("button2")?.value
-        log.debug "Home button pushed"        
-    } else if (button == 3) {
-        //Lock ST Button 1
-        name = "1"
-     	def currentST = device.currentState("button")?.value
-        log.debug "Lock Button pushed"         
-    } 
-
-    def result = createEvent(name: "button", value: "pushed", data: [buttonNumber: name], descriptionText: "$device.displayName button $name was pushed", isStateChange: true)
-    log.debug "Parse returned ${result?.descriptionText}"
-    return result
+def process_button(button_number){
+	//***NEED TO TEST
+	 //Securifi Numbering - 0 = Unlock, 1 = * (only used to join), 2 = Home, 3 = Lock
+	 if(button == 0){
+		//Unlock Button Sec-0/Hub-3
+		sendEvent( name: "pushed", value: 3, isStateChange: true )
+		if (logEnable) log.debug "Unlock Button Pressed"
+	 } else if (button == 2){
+		//Home Button Sec-2/Hub-2
+		sendEvent( name: "pushed", value: 2, isStateChange: true )
+		if (logEnable) log.debug "Home Button Pressed"
+	 
+	 } else if (button == 3){
+		//Lock Button Sec-3/Hub-1
+		sendEvent( name: "pushed", value: 1, isStateChange: true )
+		if (logEnable) log.debug "Lock Button Pressed"
+	 }
 }
-
-
-def enrollResponse() {
-    log.debug "Sending enroll response"
-    [            
-    "raw 0x500 {01 23 00 00 00}", "delay 200",
-    "send 0x${device.deviceNetworkId} ${endpointId} 1"        
-    ]
-}
-
 
 def configure(){
-    log.debug "Config Called"
-    def configCmds = [
-    "zcl global write 0x500 0x10 0xf0 {${device.zigbeeId}}", "delay 200",
-    "send 0x${device.deviceNetworkId} ${endpointId} 1", "delay 1500",
-    "zdo bind 0x${device.deviceNetworkId} ${endpointId} 0x01 0x0501 {${device.zigbeeId}} {}", "delay 500",
-    "zdo bind 0x${device.deviceNetworkId} ${endpointId} 1 1 {${device.zigbeeId}} {}"
-    ]
-    return configCmds
+	log.debug "Config Called"
+	String hubZigbeeId = swapEndianHex(device.hub.zigbeeId)
+	def configCmds = [
+		//------IAS Zone/CIE setup------//
+		//zcl global write [cluster:2] [attributeId:2] [type:4] [data:-1]
+		"zcl global write 0x500 0x10 0xf0 {${hubZigbeeId}}", "delay 200",
+		"send 0x${device.deviceNetworkId} 0x08 1", "delay 1500",
+
+		//------Set up binding------//
+		//zdo bind Dev_Nework_ID Src_Endpoint Dest_Endpoint Cluster Zigbee_ID
+		"zdo bind 0x${device.deviceNetworkId} 0x08 0x01 0x0501 {${device.zigbeeId}} {}", "delay 500",
+		//**Do we need this
+		"zdo bind 0x${device.deviceNetworkId} 0x08 1 1 {${device.zigbeeId}} {}"
+	] 
+	return configCmds
+}
+
+private String swapEndianHex(String hex) {
+    reverseArray(hex.decodeHex()).encodeHex()
+}
+
+private byte[] reverseArray(byte[] array) {
+    int i = 0;
+    int j = array.length - 1;
+    byte tmp;
+    while (j > i) {
+        tmp = array[j];
+        array[j] = array[i];
+        array[i] = tmp;
+        j--;
+        i++;
+    }
+    return array
 }
